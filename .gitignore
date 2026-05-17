@@ -1,0 +1,20 @@
+.env
+
+# pnpm
+node_modules/
+
+# OS 固有ファイル
+.DS_Store
+Thumbs.db
+
+# エディタ・IDE 一時ファイル
+.vscode/*.log
+*.swp
+*.swo
+
+# ログファイル
+*.log
+
+# ローカル設定ファイル
+*.local
+CLAUDE.local.md

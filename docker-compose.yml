@@ -1,0 +1,261 @@
+services:
+  nginx-proxy-manager:
+    image: jc21/nginx-proxy-manager:2.14.0
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: '10m'
+        max-file: '3'
+    ports:
+      - '80:80'
+      - '443:443'
+      - '127.0.0.1:81:81'
+    volumes:
+      - npm_data:/data
+      - npm_letsencrypt:/etc/letsencrypt
+    networks:
+      - proxy
+
+  postgres:
+    image: postgres:17.10
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: '10m'
+        max-file: '3'
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:?POSTGRES_USER must be set}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}
+      POSTGRES_DB: ${POSTGRES_DB:?POSTGRES_DB must be set}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - db
+    healthcheck:
+      test:
+        [
+          'CMD-SHELL',
+          'pg_isready -U ${POSTGRES_USER:?POSTGRES_USER must be set} -d ${POSTGRES_DB:?POSTGRES_DB must be set}',
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  postfix:
+    image: boky/postfix:5.1.0
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: '10m'
+        max-file: '3'
+    volumes:
+      - postfix_dkim_keys:/etc/opendkim/keys
+    environment:
+      - HOSTNAME=${POSTFIX_HOSTNAME:?POSTFIX_HOSTNAME must be set (mail server hostname, e.g. mail.waddle-inc.com)}
+      - POSTFIX_mynetworks=127.0.0.0/8 172.28.0.0/16
+      - ALLOWED_SENDER_DOMAINS=${POSTFIX_ALLOWED_SENDER_DOMAINS:?POSTFIX_ALLOWED_SENDER_DOMAINS must be set (allowed sender domains, e.g. waddle-inc.com)}
+      - POSTFIX_alias_maps=
+      - POSTFIX_alias_database=
+      - POSTFIX_smtpd_tls_security_level=none
+    healthcheck:
+      test: ['CMD-SHELL', 'postfix status']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    networks:
+      - smtp
+
+  auth-api:
+    build:
+      context: ./auth
+      dockerfile: ./apps/api/Dockerfile
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: '10m'
+        max-file: '3'
+    environment:
+      - NODE_ENV=production
+      - PORT=8000
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_NAME=${POSTGRES_DB:?POSTGRES_DB must be set}
+      - DB_USER=${POSTGRES_USER:?POSTGRES_USER must be set}
+      - DB_PASSWORD=${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}
+      - JWT_ACCESS_SECRET=${AUTH_API_JWT_ACCESS_SECRET:?AUTH_API_JWT_ACCESS_SECRET must be set}
+      - JWT_REFRESH_SECRET=${AUTH_API_JWT_REFRESH_SECRET:?AUTH_API_JWT_REFRESH_SECRET must be set}
+      - SMTP_HOST=postfix
+      - SMTP_PORT=25
+      - SMTP_FROM=${AUTH_API_SMTP_FROM:?AUTH_API_SMTP_FROM must be set (from address for auth-api emails)}
+      - EMAIL_LINK_BASE_URL=${AUTH_API_EMAIL_LINK_BASE_URL:?AUTH_API_EMAIL_LINK_BASE_URL must be set (base URL for links in auth-api emails)}
+      - CORS_ORIGIN=${AUTH_API_CORS_ORIGIN:?AUTH_API_CORS_ORIGIN must be set (frontend URL for CORS, e.g. https://auth.waddle-inc.com)}
+      - ALLOWED_CLIENTS=${AUTH_API_ALLOWED_CLIENTS:?AUTH_API_ALLOWED_CLIENTS must be set (allowed clients for auth-api)}
+    healthcheck:
+      test: ['CMD', 'wget', '-q', '--spider', 'http://localhost:8000/']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    depends_on:
+      postgres:
+        condition: service_healthy
+      postfix:
+        condition: service_healthy
+    networks:
+      - proxy
+      - smtp
+      - db
+    expose:
+      - '8000'
+
+  auth-web:
+    build:
+      context: ./auth
+      dockerfile: ./apps/web/Dockerfile
+      args:
+        - NEXT_PUBLIC_API_URL=${AUTH_WEB_API_URL:?AUTH_WEB_API_URL must be set (public API URL for auth-web)}
+        - NEXT_PUBLIC_ALLOWED_ORIGINS=${AUTH_WEB_ALLOWED_ORIGINS:?AUTH_WEB_ALLOWED_ORIGINS must be set (allowed browser origins for auth-web, e.g. https://tools.waddle-inc.com)}
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: '10m'
+        max-file: '3'
+    environment:
+      - NODE_ENV=production
+      - NEXT_PUBLIC_ALLOWED_ORIGINS=${AUTH_WEB_ALLOWED_ORIGINS:?AUTH_WEB_ALLOWED_ORIGINS must be set (allowed browser origins for auth-web, e.g. https://tools.waddle-inc.com)}
+    healthcheck:
+      test: ['CMD', 'wget', '-q', '--spider', 'http://localhost:3000/']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    networks:
+      - proxy
+    expose:
+      - '3000'
+
+  ifukuya:
+    build:
+      context: ./ifukuya
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: '10m'
+        max-file: '3'
+    healthcheck:
+      test: ['CMD', 'wget', '-q', '--spider', 'http://localhost:8080/']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    networks:
+      - proxy
+    expose:
+      - '8080'
+
+  tools-api:
+    build:
+      context: ./tools/apps/api
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: '10m'
+        max-file: '3'
+    environment:
+      - PORT=8001
+      - AUTH_API_URL=${TOOLS_API_AUTH_API_URL:?TOOLS_API_AUTH_API_URL must be set (URL of auth-api, e.g. http://auth-api:8000)}
+      - TOOLS_JWT_AUDIENCE=${TOOLS_API_JWT_AUDIENCE:?TOOLS_API_JWT_AUDIENCE must be set (e.g. tools)}
+      - JWT_SECRET=${AUTH_API_JWT_ACCESS_SECRET:?AUTH_API_JWT_ACCESS_SECRET must be set (same as auth-api JWT access signing secret for tools-api token verification)}
+      - GEMINI_API_KEY=${TOOLS_API_GEMINI_API_KEY:?TOOLS_API_GEMINI_API_KEY must be set (Google Gemini API key for tools-api)}
+      - CORS_ALLOW_ORIGINS=${TOOLS_API_CORS_ALLOW_ORIGINS:?TOOLS_API_CORS_ALLOW_ORIGINS must be set (e.g. https://tools.waddle-inc.com)}
+    healthcheck:
+      test:
+        [
+          'CMD',
+          'python',
+          '-c',
+          "import urllib.request; urllib.request.urlopen('http://localhost:8001/health')",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    depends_on:
+      auth-api:
+        condition: service_healthy
+    networks:
+      - proxy
+    expose:
+      - '8001'
+
+  tools-web:
+    build:
+      context: ./tools
+      dockerfile: apps/web/Dockerfile
+      args:
+        - VITE_API_URL=${TOOLS_WEB_API_URL:?TOOLS_WEB_API_URL must be set (public API URL for tools-web, e.g. https://api.tools.waddle-inc.com)}
+        - VITE_AUTH_WEB_URL=${TOOLS_WEB_AUTH_WEB_URL:?TOOLS_WEB_AUTH_WEB_URL must be set (public auth-web URL for tools-web, e.g. https://auth.waddle-inc.com)}
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: '10m'
+        max-file: '3'
+    healthcheck:
+      test: ['CMD', 'wget', '-q', '--spider', 'http://localhost:3001/']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    networks:
+      - proxy
+    expose:
+      - '3001'
+
+  corp:
+    build:
+      context: ./corp
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: '10m'
+        max-file: '3'
+    healthcheck:
+      test: ['CMD', 'wget', '-q', '--spider', 'http://localhost:3002/']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    networks:
+      - proxy
+    expose:
+      - '3002'
+
+volumes:
+  npm_data:
+  npm_letsencrypt:
+  postgres_data:
+  postfix_dkim_keys:
+
+networks:
+  proxy:
+    driver: bridge
+  smtp:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.28.0.0/16
+  db:
+    driver: bridge
